@@ -1,6 +1,7 @@
 import socket
 import time
 
+import pytest
 import zmq
 
 from commlink.publisher import Publisher
@@ -22,7 +23,7 @@ def set_receive_timeouts(subscriber: Subscriber, timeout_ms: int = 1000) -> None
 def test_multi_topic_specific_sockets_keep_latest_message():
     port = get_free_port()
     publisher = Publisher("*", port=port)
-    subscriber = Subscriber("127.0.0.1", port=port, topics=["alpha", "beta"], keep_old=False)
+    subscriber = Subscriber("127.0.0.1", port=port, topics=["alpha", "beta"], buffer=False)
     set_receive_timeouts(subscriber)
 
     time.sleep(0.05)
@@ -32,12 +33,10 @@ def test_multi_topic_specific_sockets_keep_latest_message():
     publisher.publish("beta", "second-beta")
     time.sleep(0.05)
 
-    topic_a, data_a = subscriber.get("alpha")
-    assert topic_a == "alpha"
+    data_a = subscriber.get("alpha")
     assert data_a == "second-alpha"
 
-    topic_b, data_b = subscriber.get("beta")
-    assert topic_b == "beta"
+    data_b = subscriber.get("beta")
     assert data_b == "second-beta"
 
     subscriber.stop()
@@ -46,7 +45,7 @@ def test_multi_topic_specific_sockets_keep_latest_message():
 def test_global_get_receives_messages_from_all_topics():
     port = get_free_port()
     publisher = Publisher("*", port=port)
-    subscriber = Subscriber("127.0.0.1", port=port, topics=["one", "two"], keep_old=True)
+    subscriber = Subscriber("127.0.0.1", port=port, topics=["one", "two"], buffer=True)
     set_receive_timeouts(subscriber)
 
     time.sleep(0.05)
@@ -67,7 +66,7 @@ def test_global_get_receives_messages_from_all_topics():
 def test_getitem_reads_specific_topic_socket():
     port = get_free_port()
     publisher = Publisher("*", port=port)
-    subscriber = Subscriber("127.0.0.1", port=port, topics=["red", "blue"], keep_old=False)
+    subscriber = Subscriber("127.0.0.1", port=port, topics=["red", "blue"], buffer=False)
     set_receive_timeouts(subscriber)
 
     time.sleep(0.05)
@@ -76,8 +75,78 @@ def test_getitem_reads_specific_topic_socket():
     publisher.publish("red", "fresh")
     time.sleep(0.05)
 
-    topic, data = subscriber["red"]
-    assert topic == "red"
+    data = subscriber["red"]
     assert data == "fresh"
 
     subscriber.stop()
+
+
+def test_get_raises_for_unsubscribed_topic():
+    port = get_free_port()
+    publisher = Publisher("*", port=port)
+    subscriber = Subscriber("127.0.0.1", port=port, topics=["alpha"], buffer=False)
+    set_receive_timeouts(subscriber)
+    time.sleep(0.05)
+
+    with pytest.raises(KeyError):
+        subscriber.get("beta")
+
+    publisher.publish("alpha", "value")
+    time.sleep(0.05)
+    assert subscriber.get("alpha") == "value"
+
+    subscriber.stop()
+
+
+def test_global_subscription_with_empty_topics_list():
+    port = get_free_port()
+    publisher = Publisher("*", port=port)
+    subscriber = Subscriber("127.0.0.1", port=port, topics=[], buffer=True)
+    set_receive_timeouts(subscriber)
+
+    time.sleep(0.05)
+    publisher.publish("x", "first")
+    publisher.publish("y", "second")
+
+    received = {subscriber.get()[0], subscriber.get()[0]}
+    assert received == {"x", "y"}
+
+    subscriber.stop()
+
+
+def test_topic_validation_rejects_spaces():
+    port = get_free_port()
+    with pytest.raises(ValueError):
+        Subscriber("127.0.0.1", port=port, topics=["bad topic"], buffer=True)
+
+
+def test_buffer_true_preserves_order_on_topic_socket():
+    port = get_free_port()
+    publisher = Publisher("*", port=port)
+    subscriber = Subscriber("127.0.0.1", port=port, topics=["seq"], buffer=True)
+    set_receive_timeouts(subscriber)
+
+    time.sleep(0.05)
+    publisher.publish("seq", 1)
+    publisher.publish("seq", 2)
+    time.sleep(0.05)
+
+    first = subscriber.get("seq")
+    second = subscriber.get("seq")
+    assert first == 1
+    assert second == 2
+
+    subscriber.stop()
+
+
+def test_conflate_global_subscription_rejected():
+    port = get_free_port()
+    with pytest.warns(RuntimeWarning):
+        sub_empty = Subscriber("127.0.0.1", port=port, topics=[], buffer=False)
+        sub_empty.stop()
+
+
+def test_topics_str_is_normalized_to_list():
+    port = get_free_port()
+    with pytest.raises(TypeError):
+        Subscriber("127.0.0.1", port=port, topics="solo", buffer=False)
