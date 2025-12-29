@@ -32,6 +32,12 @@ class Publisher:
         msg = topic + b" " + data
         self.socket.send(msg)
 
+    def __setitem__(self, topic: str, data: Any):
+        """
+        Allow dict-style publishing via publisher[topic] = data.
+        """
+        self.publish(topic, data)
+
 
 if __name__ == "__main__":
     # Example usage:

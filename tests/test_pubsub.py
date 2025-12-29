@@ -81,6 +81,21 @@ def test_getitem_reads_specific_topic_socket():
     subscriber.stop()
 
 
+def test_setitem_publishes():
+    port = get_free_port()
+    publisher = Publisher("*", port=port)
+    subscriber = Subscriber("127.0.0.1", port=port, topics=["alpha"], buffer=False)
+    set_receive_timeouts(subscriber)
+
+    time.sleep(0.05)
+    publisher["alpha"] = "published via setitem"
+    time.sleep(0.05)
+
+    assert subscriber["alpha"] == "published via setitem"
+
+    subscriber.stop()
+
+
 def test_get_raises_for_unsubscribed_topic():
     port = get_free_port()
     publisher = Publisher("*", port=port)
