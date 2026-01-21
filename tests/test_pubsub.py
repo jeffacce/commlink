@@ -165,3 +165,23 @@ def test_topics_str_is_normalized_to_list():
     port = get_free_port()
     with pytest.raises(TypeError):
         Subscriber("127.0.0.1", port=port, topics="solo", buffer=False)
+
+
+def test_buffer_false_implies_persistence():
+    port = get_free_port()
+    publisher = Publisher("*", port=port)
+    # Persistence is now automatic when buffer=False
+    subscriber = Subscriber("127.0.0.1", port=port, topics=["p1"], buffer=False)
+    set_receive_timeouts(subscriber)
+
+    time.sleep(0.05)
+    publisher["p1"] = "persisted"
+    time.sleep(0.05)
+
+    # First read
+    assert subscriber["p1"] == "persisted"
+
+    # Second read - should be cached
+    assert subscriber["p1"] == "persisted"
+
+    subscriber.stop()
