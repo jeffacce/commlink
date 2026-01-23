@@ -1,5 +1,5 @@
 import zmq
-import pickle
+from commlink.serializer import serialize, deserialize
 
 
 class RPCException(Exception):
@@ -37,7 +37,7 @@ class RPCClient:
         Send a get request over the socket.
         """
         req = {"req": "get", "attr": attr, "args": args, "kwargs": kwargs}
-        self.socket.send(pickle.dumps(req))
+        self.socket.send_multipart(serialize("rpc", req))
         return self._recv_result()
 
     def _send_set(self, attr: str, value):
@@ -45,7 +45,7 @@ class RPCClient:
         Send a set request over the socket.
         """
         req = {"req": "set", "attr": attr, "value": value}
-        self.socket.send(pickle.dumps(req))
+        self.socket.send_multipart(serialize("rpc", req))
         return self._recv_result()
 
     def _recv_result(self):
@@ -61,8 +61,8 @@ class RPCClient:
         }; re-raise the exception on the client side
         if type == "result", content is the result
         """
-        result = self.socket.recv()
-        result = pickle.loads(result)
+        result = self.socket.recv_multipart()
+        _, result = deserialize(result)
         if result["type"] == "exception":
             raise RPCException(
                 result["content"]["exception"],
@@ -78,7 +78,7 @@ class RPCClient:
         """
         if attr not in self._is_callable_cache:
             req = {"req": "is_callable", "attr": attr}
-            self.socket.send(pickle.dumps(req))
+            self.socket.send_multipart(serialize("rpc", req))
             result = self._recv_result()
             self._is_callable_cache[attr] = result
         return self._is_callable_cache[attr]
@@ -99,7 +99,7 @@ class RPCClient:
         Return a list of attributes.
         """
         req = {"req": "dir"}
-        self.socket.send(pickle.dumps(req))
+        self.socket.send_multipart(serialize("rpc", req))
         result = self._recv_result()
         return result + ["stop_server"]
 
@@ -110,7 +110,7 @@ class RPCClient:
         Returns a bool for success.
         """
         req = {"req": "stop"}
-        self.socket.send(pickle.dumps(req))
+        self.socket.send_multipart(serialize("rpc", req))
         stopped = self._recv_result()
         if stopped:
             self.socket.close()
@@ -122,7 +122,6 @@ class RPCClient:
 
 if __name__ == "__main__":
     import time
-    import numpy as np
 
     Hello = RPCClient("localhost", port=1234)
     arr = []

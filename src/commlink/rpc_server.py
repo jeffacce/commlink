@@ -1,8 +1,8 @@
 import zmq
 import time
-import pickle
 import threading
 import traceback
+from commlink.serializer import serialize, deserialize
 
 
 class RPCServer:
@@ -35,14 +35,14 @@ class RPCServer:
                 "traceback": traceback.format_exc(),
             },
         }
-        self.socket.send(pickle.dumps(exception))
+        self.socket.send_multipart(serialize("rpc_exception", exception))
 
     def _send_result(self, result):
         """
         Serialize a result and send it over the socket.
         """
         result = {"type": "result", "content": result}
-        self.socket.send(pickle.dumps(result))
+        self.socket.send_multipart(serialize("rpc_result", result))
 
     def run(self):
         """
@@ -51,16 +51,17 @@ class RPCServer:
         if self.threaded:
             while not self.stop_event.is_set():
                 try:
-                    message = self.socket.recv()
-                    message = pickle.loads(message)
+                    frames = self.socket.recv_multipart()
+                    _, message = deserialize(frames)
+                    
                     self._handle_message(message)
                 except zmq.ContextTerminated:
                     break
         else:
             while not self.stop_event:
                 try:
-                    message = self.socket.recv(flags=zmq.NOBLOCK)
-                    message = pickle.loads(message)
+                    frames = self.socket.recv_multipart(flags=zmq.NOBLOCK)
+                    _, message = deserialize(frames)
                 except zmq.Again:
                     time.sleep(0.001)
                     continue
