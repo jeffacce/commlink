@@ -2,14 +2,24 @@ import zmq
 import time
 import threading
 import traceback
-from commlink.serializer import serialize, deserialize
+from typing import Optional
+from commlink.serializer import Serializer
 
 
 class RPCServer:
-    def __init__(self, obj, port: int = 5000, threaded: bool = True):
+    def __init__(
+        self,
+        obj,
+        port: int = 5000,
+        threaded: bool = True,
+        compression: Optional[str] = None,
+    ):
         """
         obj: object with methods to expose
         port: port to listen on
+        compression: optional codec for response payloads. One of None, 'zstd', 'lz4'.
+            The wire format is self-describing, so the client may use a different setting
+            for its outbound requests.
         """
         self.obj = obj
         self.context = zmq.Context()
@@ -17,6 +27,8 @@ class RPCServer:
         self.socket.bind(f"tcp://*:{port}")
         self.threaded = threaded
         self.thread = None
+        self.compression = compression
+        self._serializer = Serializer(compression=compression)
         if threaded:
             self.stop_event = threading.Event()
         else:
@@ -35,14 +47,14 @@ class RPCServer:
                 "traceback": traceback.format_exc(),
             },
         }
-        self.socket.send_multipart(serialize("rpc_exception", exception))
+        self.socket.send_multipart(self._serializer.serialize("rpc_exception", exception))
 
     def _send_result(self, result):
         """
         Serialize a result and send it over the socket.
         """
         result = {"type": "result", "content": result}
-        self.socket.send_multipart(serialize("rpc_result", result))
+        self.socket.send_multipart(self._serializer.serialize("rpc_result", result))
 
     def run(self):
         """
@@ -52,7 +64,7 @@ class RPCServer:
             while not self.stop_event.is_set():
                 try:
                     frames = self.socket.recv_multipart()
-                    _, message = deserialize(frames)
+                    _, message = self._serializer.deserialize(frames)
                     
                     self._handle_message(message)
                 except zmq.ContextTerminated:
@@ -61,7 +73,7 @@ class RPCServer:
             while not self.stop_event:
                 try:
                     frames = self.socket.recv_multipart(flags=zmq.NOBLOCK)
-                    _, message = deserialize(frames)
+                    _, message = self._serializer.deserialize(frames)
                 except zmq.Again:
                     time.sleep(0.001)
                     continue

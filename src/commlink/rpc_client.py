@@ -1,5 +1,6 @@
+from typing import Optional
 import zmq
-from commlink.serializer import serialize, deserialize
+from commlink.serializer import Serializer
 
 
 class RPCException(Exception):
@@ -13,15 +14,19 @@ class RPCException(Exception):
 
 
 class RPCClient:
-    def __init__(self, host: str, port: int = 5000):
+    def __init__(self, host: str, port: int = 5000, compression: Optional[str] = None):
         """
         host: host to connect to
         port: port to connect to
+        compression: optional codec for outbound request payloads. One of None, 'zstd', 'lz4'.
+            The wire format is self-describing, so the server may use a different setting.
         """
         self.__dict__["context"] = zmq.Context()
         self.__dict__["socket"] = self.context.socket(zmq.REQ)
         self.socket.connect(f"tcp://{host}:{port}")
         self.__dict__["_is_callable_cache"] = {}
+        self.__dict__["compression"] = compression
+        self.__dict__["_serializer"] = Serializer(compression=compression)
 
     def __setattr__(self, attr: str, value):
         """
@@ -37,7 +42,7 @@ class RPCClient:
         Send a get request over the socket.
         """
         req = {"req": "get", "attr": attr, "args": args, "kwargs": kwargs}
-        self.socket.send_multipart(serialize("rpc", req))
+        self.socket.send_multipart(self._serializer.serialize("rpc", req))
         return self._recv_result()
 
     def _send_set(self, attr: str, value):
@@ -45,7 +50,7 @@ class RPCClient:
         Send a set request over the socket.
         """
         req = {"req": "set", "attr": attr, "value": value}
-        self.socket.send_multipart(serialize("rpc", req))
+        self.socket.send_multipart(self._serializer.serialize("rpc", req))
         return self._recv_result()
 
     def _recv_result(self):
@@ -62,7 +67,7 @@ class RPCClient:
         if type == "result", content is the result
         """
         result = self.socket.recv_multipart()
-        _, result = deserialize(result)
+        _, result = self._serializer.deserialize(result)
         if result["type"] == "exception":
             raise RPCException(
                 result["content"]["exception"],
@@ -78,7 +83,7 @@ class RPCClient:
         """
         if attr not in self._is_callable_cache:
             req = {"req": "is_callable", "attr": attr}
-            self.socket.send_multipart(serialize("rpc", req))
+            self.socket.send_multipart(self._serializer.serialize("rpc", req))
             result = self._recv_result()
             self._is_callable_cache[attr] = result
         return self._is_callable_cache[attr]
@@ -99,7 +104,7 @@ class RPCClient:
         Return a list of attributes.
         """
         req = {"req": "dir"}
-        self.socket.send_multipart(serialize("rpc", req))
+        self.socket.send_multipart(self._serializer.serialize("rpc", req))
         result = self._recv_result()
         return result + ["stop_server"]
 
@@ -110,7 +115,7 @@ class RPCClient:
         Returns a bool for success.
         """
         req = {"req": "stop"}
-        self.socket.send_multipart(serialize("rpc", req))
+        self.socket.send_multipart(self._serializer.serialize("rpc", req))
         stopped = self._recv_result()
         if stopped:
             self.socket.close()

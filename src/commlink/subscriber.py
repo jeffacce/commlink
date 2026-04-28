@@ -2,7 +2,7 @@ from typing import Iterable, Optional, Any
 import warnings
 import zmq
 
-from commlink.serializer import deserialize
+from commlink.serializer import Serializer
 
 class Subscriber:
     def __init__(
@@ -11,6 +11,8 @@ class Subscriber:
         port: int = 5000,
         topics: Optional[Iterable[str]] = [],
         buffer: bool = False,
+        compression: Optional[str] = None,
+        queue_size: Optional[int] = 10,
     ):
         """
         host: host to connect to
@@ -21,8 +23,20 @@ class Subscriber:
             Default False (only keep latest for each topic).
             If False, it also maintains a cache of the last received message.
             This means get() will return the last known value if no new data is available.
+        compression: optional codec hint. One of None, 'zstd', 'lz4'. The wire format is
+            self-describing, so this only controls which decompressor is eagerly loaded;
+            other codecs are still decoded on demand.
+        queue_size: max number of pending messages to keep buffered on the receive
+            side before the publisher starts silently dropping new ones. Default 10,
+            tuned for real-time streaming -- a momentarily slow consumer cannot
+            accumulate stale frames or unbounded memory. Pass a larger value
+            (e.g. 1000) for buffered/event use cases, or None to use ZMQ's built-in
+            (1000). (Sets ZMQ_RCVHWM under the hood.)
         """
         self.buffer = buffer
+        self.compression = compression
+        self.queue_size = queue_size
+        self._serializer = Serializer(compression=compression)
         self.context = zmq.Context()
         self._endpoint = f"tcp://{host}:{port}"
         self._topic_sockets: dict[Optional[str], zmq.Socket] = {}
@@ -64,7 +78,7 @@ class Subscriber:
         # Helper to receive one message
         def recv_one(flags=0):
             frames = socket.recv_multipart(flags=flags)
-            return deserialize(frames)
+            return self._serializer.deserialize(frames)
 
         # If not buffering, we want the LATEST message (conflation) AND we persist the last value.
         # Since ZMQ_CONFLATE doesn't support multipart, we manually drain the queue.
@@ -126,6 +140,9 @@ class Subscriber:
 
     def _new_socket(self) -> zmq.Socket:
         socket = self.context.socket(zmq.SUB)
+        # ZMQ_RCVHWM must be set BEFORE connect to take effect.
+        if self.queue_size is not None:
+            socket.setsockopt(zmq.RCVHWM, self.queue_size)
         return socket
 
     def _create_topic_socket(self, topic: str) -> zmq.Socket:

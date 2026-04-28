@@ -4,6 +4,7 @@ from .publisher import Publisher
 from .subscriber import Subscriber
 from .rpc_client import RPCClient, RPCException
 from .rpc_server import RPCServer
+from .serializer import Serializer, serialize, deserialize
 
 __all__ = [
     "Publisher",
@@ -11,6 +12,9 @@ __all__ = [
     "RPCClient",
     "RPCException",
     "RPCServer",
+    "Serializer",
+    "serialize",
+    "deserialize",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"

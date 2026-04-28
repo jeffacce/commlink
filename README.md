@@ -100,6 +100,31 @@ print(sub["camera_pose"].shape)
 print(sub["info"])
 ```
 
+## Compression
+
+`Publisher`, `Subscriber`, `RPCServer`, and `RPCClient` all accept an optional
+`compression` argument. Supported values: `None` (default), `"zstd"`, `"lz4"`.
+Both codecs ship with Commlink -- no extras to install.
+
+```python
+pub = Publisher("*", port=5555, compression="zstd")
+sub = Subscriber("localhost", port=5555, topics=["frame"], compression="zstd")
+```
+
+The codec is bound at construction time, so the per-message hot path has no
+extra branching. The wire format is self-describing (each frame carries a 1-byte
+codec tag), which means the receiver can decode any codec regardless of how it
+was configured -- mixing `compression=None` and `compression="zstd"` between
+sender and receiver still works. This also preserves backward compatibility
+with publishers that predate the compression option.
+
+For a streaming benchmark that reports wire size, latency, jitter, and
+bandwidth across codecs:
+
+```bash
+python benchmarks/benchmark_compression.py --iters 100
+```
+
 ## Development
 
 Run the automated test suite with:
