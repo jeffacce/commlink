@@ -33,6 +33,11 @@ class RPCServer:
             self.stop_event = threading.Event()
         else:
             self.stop_event = False
+        # stop() can be invoked concurrently from the run thread (via the
+        # 'stop' RPC request) and from an external caller (e.g. a test's
+        # finally block). Serialize so the cleanup runs exactly once.
+        self._stop_lock = threading.Lock()
+        self._stopped = False
 
     def _send_exception(self, e):
         """
@@ -65,10 +70,16 @@ class RPCServer:
                 try:
                     frames = self.socket.recv_multipart()
                     _, message = self._serializer.deserialize(frames)
-                    
+
                     self._handle_message(message)
                 except zmq.ContextTerminated:
                     break
+                except zmq.ZMQError:
+                    # Socket was closed from another thread (likely by stop()).
+                    # If we're being shut down, exit cleanly; otherwise re-raise.
+                    if self.stop_event.is_set():
+                        break
+                    raise
         else:
             while not self.stop_event:
                 try:
@@ -139,15 +150,27 @@ class RPCServer:
             self.run()
 
     def stop(self):
-        self.socket.close()
-        self.context.term()
-        if self.threaded:
-            self.stop_event.set()
-            if self.thread and threading.current_thread() is not self.thread:
-                self.thread.join()
-            self.thread = None
-        else:
-            self.stop_event = True
+        # Serialize so concurrent callers (e.g. in-thread stop via "stop"
+        # message racing with an external finally-block stop) don't double
+        # close / double term, which can deadlock context.term().
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self._stopped = True
+            # Signal shutdown BEFORE closing the socket / terminating the
+            # context. Otherwise if the run thread is blocked in
+            # recv_multipart, context.term() waits forever for that recv to
+            # complete and stop_event never gets set.
+            if self.threaded:
+                self.stop_event.set()
+            else:
+                self.stop_event = True
+            self.socket.close()
+            self.context.term()
+            if self.threaded:
+                if self.thread and threading.current_thread() is not self.thread:
+                    self.thread.join()
+                self.thread = None
 
 
 if __name__ == "__main__":

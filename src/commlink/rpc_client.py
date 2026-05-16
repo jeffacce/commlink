@@ -1,3 +1,4 @@
+import threading
 from typing import Optional
 import zmq
 from commlink.serializer import Serializer
@@ -27,6 +28,10 @@ class RPCClient:
         self.__dict__["_is_callable_cache"] = {}
         self.__dict__["compression"] = compression
         self.__dict__["_serializer"] = Serializer(compression=compression)
+        # zmq.REQ enforces strict send->recv alternation and zmq sockets are not
+        # thread-safe; serialize each request/response pair so concurrent callers
+        # don't trip the REQ state machine (EFSM).
+        self.__dict__["_lock"] = threading.Lock()
 
     def __setattr__(self, attr: str, value):
         """
@@ -42,16 +47,18 @@ class RPCClient:
         Send a get request over the socket.
         """
         req = {"req": "get", "attr": attr, "args": args, "kwargs": kwargs}
-        self.socket.send_multipart(self._serializer.serialize("rpc", req))
-        return self._recv_result()
+        with self._lock:
+            self.socket.send_multipart(self._serializer.serialize("rpc", req))
+            return self._recv_result()
 
     def _send_set(self, attr: str, value):
         """
         Send a set request over the socket.
         """
         req = {"req": "set", "attr": attr, "value": value}
-        self.socket.send_multipart(self._serializer.serialize("rpc", req))
-        return self._recv_result()
+        with self._lock:
+            self.socket.send_multipart(self._serializer.serialize("rpc", req))
+            return self._recv_result()
 
     def _recv_result(self):
         """
@@ -83,8 +90,9 @@ class RPCClient:
         """
         if attr not in self._is_callable_cache:
             req = {"req": "is_callable", "attr": attr}
-            self.socket.send_multipart(self._serializer.serialize("rpc", req))
-            result = self._recv_result()
+            with self._lock:
+                self.socket.send_multipart(self._serializer.serialize("rpc", req))
+                result = self._recv_result()
             self._is_callable_cache[attr] = result
         return self._is_callable_cache[attr]
 
@@ -104,8 +112,9 @@ class RPCClient:
         Return a list of attributes.
         """
         req = {"req": "dir"}
-        self.socket.send_multipart(self._serializer.serialize("rpc", req))
-        result = self._recv_result()
+        with self._lock:
+            self.socket.send_multipart(self._serializer.serialize("rpc", req))
+            result = self._recv_result()
         return result + ["stop_server"]
 
     def stop_server(self) -> bool:
@@ -115,13 +124,14 @@ class RPCClient:
         Returns a bool for success.
         """
         req = {"req": "stop"}
-        self.socket.send_multipart(self._serializer.serialize("rpc", req))
-        stopped = self._recv_result()
-        if stopped:
-            self.socket.close()
-            self.context.term()
-        else:
-            raise RuntimeError("Could not stop the server.")
+        with self._lock:
+            self.socket.send_multipart(self._serializer.serialize("rpc", req))
+            stopped = self._recv_result()
+            if stopped:
+                self.socket.close()
+                self.context.term()
+            else:
+                raise RuntimeError("Could not stop the server.")
         return stopped
 
 

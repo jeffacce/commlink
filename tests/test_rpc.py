@@ -76,6 +76,61 @@ def test_rpc_client_connect():
             server.stop()
 
 
+def test_rpc_client_concurrent_calls_no_efsm():
+    """Concurrent calls from multiple threads on one RPCClient must not trip
+    zmq.REQ's send->recv state machine (EFSM)."""
+    port = get_free_port()
+    service = ExampleService()
+    server, _ = start_server(service, port, threaded=True)
+    try:
+        client = RPCClient("127.0.0.1", port=port)
+        # Warm _is_callable_cache so workers exercise only _send_get.
+        client.increment(0)
+
+        n_threads = 4
+        calls_per_thread = 100
+        errors: list[BaseException] = []
+        err_lock = threading.Lock()
+
+        def worker():
+            for _ in range(calls_per_thread):
+                try:
+                    client.increment(0)
+                except Exception as e:
+                    with err_lock:
+                        errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert all(not t.is_alive() for t in threads), "worker thread hung"
+        assert not errors, f"got {len(errors)} errors, first: {errors[0]!r}"
+    finally:
+        if server.thread is not None:
+            server.stop()
+
+
+def test_rpc_server_stop_returns_promptly():
+    """RPCServer.stop() must not hang when the run thread is blocked in
+    recv_multipart()."""
+    port = get_free_port()
+    service = ExampleService()
+    server, _ = start_server(service, port, threaded=True)
+
+    # At this point the server thread is blocked in recv_multipart. Calling
+    # stop() previously deadlocked because context.term() waited for the
+    # blocking recv that stop_event was supposed to break out of.
+    t0 = time.monotonic()
+    server.stop()
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 2.0, f"server.stop() took {elapsed:.2f}s (expected <2s)"
+    assert server.thread is None
+
+
 @pytest.mark.parametrize("threaded", [True, False])
 def test_rpc_server_client_integration(threaded):
     port = get_free_port()
