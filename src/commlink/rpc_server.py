@@ -7,6 +7,18 @@ from commlink.serializer import Serializer
 
 
 class RPCServer:
+    """
+    Expose an object's attributes and methods to remote RPCClients.
+
+        server = RPCServer(my_obj, port=5000)
+        server.start()        # non-blocking; pass threaded=False to block instead
+
+    Clients can call methods, read/write attributes, and request shutdown
+    via stop_server(). Requests are handled one at a time, so a slow method
+    serializes other clients. Exceptions raised by the exposed object are
+    re-raised on the client as RPCException.
+    """
+
     def __init__(
         self,
         obj,
@@ -16,13 +28,13 @@ class RPCServer:
         compression_min_bytes: int = 1024,
     ):
         """
-        obj: object with methods to expose
-        port: port to listen on
-        compression: optional codec for response payloads. One of None, 'zstd', 'lz4'.
-            The wire format is self-describing, so the client may use a different setting
-            for its outbound requests.
-        compression_min_bytes: per-frame size threshold below which compression is
-            skipped. Has no effect when compression is None. Defaults to 1024.
+        obj: the object whose methods and attributes to expose.
+        port: port to listen on.
+        threaded: if True (default), start() launches the server in a
+            background thread. If False, start() blocks the calling thread.
+        compression: None, 'zstd', or 'lz4'. Applied to responses.
+        compression_min_bytes: responses smaller than this skip compression.
+            Ignored when compression is None.
         """
         self.obj = obj
         self.context = zmq.Context()

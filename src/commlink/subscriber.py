@@ -21,6 +21,25 @@ _FIRST_CALL_POLL_INTERVAL = 0.01
 
 
 class Subscriber:
+    """
+    Pub/sub subscriber with two modes.
+
+    Pull mode (default, buffer=False):
+        sub = Subscriber("host", port=5000)
+        latest = sub["joint_state"]      # returns the latest published value
+    The first read of a topic the publisher has not yet published blocks
+    until a value arrives.
+
+    Push mode (buffer=True):
+        sub = Subscriber("host", port=5000, topics=["img"], buffer=True)
+        data = sub["img"]                # blocks for next unread frame
+        topic, data = sub.get()          # next frame on any subscribed topic
+    Every published frame is delivered into per-topic bounded queues; on
+    overflow the oldest frame is dropped.
+
+    Call stop() when done (also runs in __del__).
+    """
+
     def __init__(
         self,
         host: str,
@@ -31,19 +50,13 @@ class Subscriber:
         queue_size: int = 30,
     ):
         """
-        host, port: publisher endpoint.
-        topics: optional filter. None = no filter (all topics). In pull mode (buffer=False)
-            the filter is informational only; each sub[k] still issues a fresh PULL.
-            In push mode (buffer=True) the filter is sent to the publisher so it can
-            skip irrelevant topics in fanout.
-        buffer: False (default) = pull mode. sub[k] does one PULL round trip and returns
-            the latest cached payload (or blocks on first call until the publisher has
-            data for that topic). True = push mode. Subscriber receives every published
-            frame for matching topics into per-topic bounded queues.
-        compression: deprecated, silently accepted. The wire format is self-describing,
-            so the subscriber decodes any codec automatically.
-        queue_size: only used in push mode. Per-topic deque maxlen and ZMQ_RCVHWM.
-            Default 30 (~1s of 30 Hz jitter). Ignored in pull mode.
+        host, port: publisher's address and port.
+        topics: which topics to subscribe to. None = all topics.
+        buffer: False (default) = pull mode: each read returns the latest
+            published value. True = push mode: receive every published frame
+            into per-topic queues.
+        compression: deprecated, ignored.
+        queue_size: push mode only. Per-topic queue capacity.
         """
         if isinstance(topics, str):
             raise TypeError("topics must be an iterable of strings, not a single string")

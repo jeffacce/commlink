@@ -16,6 +16,20 @@ OP_OK = b"OK"
 
 
 class Publisher:
+    """
+    Pub/sub publisher. Bind once, publish to many named topics.
+
+        pub = Publisher("*", port=5000)
+        pub["joint_state"] = {...}       # or pub.publish("joint_state", {...})
+
+    The latest payload per topic is cached. Pull-mode subscribers fetch the
+    cached value on demand; push-mode subscribers receive every publish()
+    going forward. publish() never blocks: if a push subscriber's outbound
+    queue is full, that frame is dropped for that subscriber.
+
+    Call stop() when done (also runs in __del__).
+    """
+
     def __init__(
         self,
         host: str,
@@ -25,20 +39,14 @@ class Publisher:
         queue_size: Optional[int] = 10,
     ):
         """
-        host: bind address for the ROUTER socket (e.g. "*" for all interfaces).
-        port: bind port.
-        compression: optional codec for payload compression. One of None, 'zstd', 'lz4'.
-                     The wire format is self-describing, so subscribers do not need a
-                     matching setting.
-        compression_min_bytes: per-frame size threshold below which compression is
-                     skipped. Each pickle main frame and out-of-band buffer is
-                     evaluated independently, so a small joint-state message pays
-                     no compression cost while images in the same publisher are
-                     still compressed. Has no effect when compression is None.
-                     Defaults to 1024.
-        queue_size: ZMQ_SNDHWM for the ROUTER socket. Bounds how many outbound frames
-                    may queue per subscriber identity before sends start dropping.
-                    Default 10. None falls through to ZMQ's built-in (1000).
+        host: address to bind on. Use "*" to accept connections from anywhere.
+        port: port to bind on.
+        compression: None, 'zstd', or 'lz4'.
+        compression_min_bytes: payloads smaller than this skip compression,
+            so mixing tiny state messages with large images in one publisher
+            is fine. Ignored when compression is None.
+        queue_size: outgoing message buffer per subscriber. Once full, new
+            publishes to that subscriber are dropped.
         """
         self.context = zmq.Context.instance()
         self.socket = self.context.socket(zmq.ROUTER)

@@ -15,6 +15,19 @@ class RPCException(Exception):
 
 
 class RPCClient:
+    """
+    Transparent proxy to an object exposed by an RPCServer.
+
+        obj = RPCClient("host", port=5000)
+        obj.some_method(1, 2)     # remote call
+        obj.some_attr             # remote attribute read
+        obj.some_attr = 7         # remote attribute write
+        obj.stop_server()         # ask the server to exit
+
+    Thread-safe: concurrent calls are serialized internally. Exceptions
+    raised by the remote object surface here as RPCException.
+    """
+
     def __init__(
         self,
         host: str,
@@ -23,12 +36,12 @@ class RPCClient:
         compression_min_bytes: int = 1024,
     ):
         """
-        host: host to connect to
-        port: port to connect to
-        compression: optional codec for outbound request payloads. One of None, 'zstd', 'lz4'.
-            The wire format is self-describing, so the server may use a different setting.
-        compression_min_bytes: per-frame size threshold below which compression is
-            skipped. Has no effect when compression is None. Defaults to 1024.
+        host, port: server's address and port.
+        compression: None, 'zstd', or 'lz4'. Applied to outgoing requests.
+            Usually only worth setting if you send large payloads (e.g. images)
+            to the server.
+        compression_min_bytes: requests smaller than this skip compression.
+            Ignored when compression is None.
         """
         self.__dict__["context"] = zmq.Context()
         self.__dict__["socket"] = self.context.socket(zmq.REQ)
