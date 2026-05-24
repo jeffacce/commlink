@@ -72,30 +72,30 @@ class RPCServer:
         """
         Run the server.
         """
-        if self.threaded:
-            while not self.stop_event.is_set():
-                try:
-                    frames = self.socket.recv_multipart()
-                    _, message = self._serializer.deserialize(frames)
-
+        try:
+            if self.threaded:
+                poller = zmq.Poller()
+                poller.register(self.socket, zmq.POLLIN)
+                while not self.stop_event.is_set():
+                    socks = dict(poller.poll(timeout=100))
+                    if self.socket in socks:
+                        frames = self.socket.recv_multipart()
+                        _, message = self._serializer.deserialize(frames)
+                        self._handle_message(message)
+            else:
+                while not self.stop_event:
+                    try:
+                        frames = self.socket.recv_multipart(flags=zmq.NOBLOCK)
+                        _, message = self._serializer.deserialize(frames)
+                    except zmq.Again:
+                        time.sleep(0.001)
+                        continue
                     self._handle_message(message)
-                except zmq.ContextTerminated:
-                    break
-                except zmq.ZMQError:
-                    # Socket was closed from another thread (likely by stop()).
-                    # If we're being shut down, exit cleanly; otherwise re-raise.
-                    if self.stop_event.is_set():
-                        break
-                    raise
-        else:
-            while not self.stop_event:
-                try:
-                    frames = self.socket.recv_multipart(flags=zmq.NOBLOCK)
-                    _, message = self._serializer.deserialize(frames)
-                except zmq.Again:
-                    time.sleep(0.001)
-                    continue
-                self._handle_message(message)
+        finally:
+            # Socket and context are owned by the run thread — closing them
+            # from another thread races with recv and can deadlock term().
+            self.socket.close()
+            self.context.term()
 
     def _is_callable(self, attr):
         return hasattr(self.obj, attr) and callable(getattr(self.obj, attr))
@@ -157,27 +157,17 @@ class RPCServer:
             self.run()
 
     def stop(self):
-        # Serialize so concurrent callers (e.g. in-thread stop via "stop"
-        # message racing with an external finally-block stop) don't double
-        # close / double term, which can deadlock context.term().
         with self._stop_lock:
             if self._stopped:
                 return
             self._stopped = True
-            # Signal shutdown BEFORE closing the socket / terminating the
-            # context. Otherwise if the run thread is blocked in
-            # recv_multipart, context.term() waits forever for that recv to
-            # complete and stop_event never gets set.
             if self.threaded:
                 self.stop_event.set()
+                if self.thread is not None and threading.current_thread() is not self.thread:
+                    self.thread.join()
+                    self.thread = None
             else:
                 self.stop_event = True
-            self.socket.close()
-            self.context.term()
-            if self.threaded:
-                if self.thread and threading.current_thread() is not self.thread:
-                    self.thread.join()
-                self.thread = None
 
 
 if __name__ == "__main__":
