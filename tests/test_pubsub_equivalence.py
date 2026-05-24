@@ -67,18 +67,16 @@ def assert_data_equal(a, b):
     else:
         assert a == b
 
-def run_pubsub_exchange(port, fast_mode, topic, payload):
+def run_pubsub_exchange(port, topic, payload):
     """
     Spin up a publisher and subscriber, send one message, return the received message.
     """
     recv_queue = queue.Queue()
-    
-    # Subscriber always auto-detects, so config is same
+
     sub = Subscriber("localhost", port=port, topics=[topic], buffer=True)
-    
+
     def listener():
         try:
-            # Wait up to 2 seconds
             t, d = sub.get()
             recv_queue.put(d)
         except Exception as e:
@@ -86,48 +84,32 @@ def run_pubsub_exchange(port, fast_mode, topic, payload):
 
     t = threading.Thread(target=listener)
     t.start()
-    
-    # fast_mode=True means legacy_serializer=False
-    # fast_mode=False means legacy_serializer=True
-    pub = Publisher("localhost", port=port, legacy_serializer=not fast_mode)
+
+    pub = Publisher("localhost", port=port)
     time.sleep(0.2) # Allow connection
-    
+
     pub.publish(topic, payload)
-    
+
     t.join(timeout=3)
     sub.stop()
-    
+
     if recv_queue.empty():
-        pytest.fail(f"Did not receive message for {topic} (Fast={fast_mode})")
-        
+        pytest.fail(f"Did not receive message for {topic}")
+
     result = recv_queue.get()
     if isinstance(result, Exception):
         raise result
-        
+
     return result
 
 @pytest.mark.parametrize("name,payload", get_payloads())
-def test_pubsub_equivalence(name, payload):
-    # Unique ports to avoid conflicts during parallel testing (though pytest defaults to output capture not parallel)
-    # We'll use a base port + hash or similar, or just sequential if running single thread.
-    # For safety let's pick a random port or rely on OS to free quickly.
-    # Actually, simpler: define port based on test case hash
-    port_base = 10000 + hash(name) % 5000
-    
-    # 1. Run Legacy
-    legacy_res = run_pubsub_exchange(port_base, False, "test_legacy", payload)
-    assert_data_equal(payload, legacy_res)
-    
-    # 2. Run Fast
-    fast_res = run_pubsub_exchange(port_base + 1, True, "test_fast", payload)
-    assert_data_equal(payload, fast_res)
-    
-    # 3. Explicit Comparison
-    assert_data_equal(legacy_res, fast_res)
+def test_pubsub_roundtrip(name, payload):
+    port = 10000 + hash(name) % 5000
+    res = run_pubsub_exchange(port, "test", payload)
+    assert_data_equal(payload, res)
 
 if __name__ == "__main__":
-    # Allow running manually
     for name, payload in get_payloads():
         print(f"Testing {name}...")
-        test_pubsub_equivalence(name, payload)
+        test_pubsub_roundtrip(name, payload)
         print("PASS")

@@ -4,29 +4,27 @@ import torch
 from commlink.serializer import serialize, deserialize
 import pickle
 
-def test_legacy_equivalence():
-    """Test that legacy serialization works as expected (now returns list of frames)."""
+def test_deserialize_accepts_pre_protocol5_multipart():
+    """Inbound back-compat: frames from old senders that emitted
+    [topic_bytes, pickle.dumps(data)] must still deserialize."""
     data = {"key": "value", "num": 123}
     topic = "test"
-    
-    # Legacy now returns [topic_bytes, pickle_bytes]
-    frames = serialize(topic, data, legacy=True)
-    assert isinstance(frames, list)
-    assert len(frames) == 2
-    assert frames[0] == b"test"
-    assert frames[1] == pickle.dumps(data)
-    
-    # Test that we can deserialize this using the unified deserializer
+    frames = [topic.encode("utf-8"), pickle.dumps(data)]
+
     recovered_topic, recovered_data = deserialize(frames)
     assert recovered_topic == topic
     assert recovered_data == data
 
-    # Test backward compatibility: Manually construct old single-frame message
-    old_style_msg = frames[0] + b" " + frames[1]
-    # Pass as list of one frame, which is what zmq recv_multipart returns for single message
-    recovered_topic_old, recovered_data_old = deserialize([old_style_msg])
-    assert recovered_topic_old == topic
-    assert recovered_data_old == data
+
+def test_deserialize_accepts_single_frame_legacy():
+    """Inbound back-compat: very old senders emitted b'<topic> <pickle>' as one frame."""
+    data = {"key": "value", "num": 123}
+    topic = "test"
+    old_style_msg = topic.encode("utf-8") + b" " + pickle.dumps(data)
+
+    recovered_topic, recovered_data = deserialize([old_style_msg])
+    assert recovered_topic == topic
+    assert recovered_data == data
 
 def test_default_equivalence_numpy():
     """Test that default serialization preserves numpy arrays exactly."""
@@ -51,16 +49,3 @@ def test_default_equivalence_torch():
     assert recovered_topic == topic
     assert torch.equal(recovered_data['tens'], data['tens'])
 
-def test_unified_deserialization_handles_legacy_frames():
-    """
-    Test that the new unified deserialize() function can handle 
-    the list of frames produced by serialize(..., legacy=True).
-    """
-    data = {"foo": "bar"}
-    topic = "legacy_test"
-    legacy_frames = serialize(topic, data, legacy=True)
-    
-    # Unified deserialize should handle [topic, pickle_data] just fine
-    recovered_topic, recovered_data = deserialize(legacy_frames)
-    assert recovered_topic == topic
-    assert recovered_data == data

@@ -46,10 +46,10 @@ class Serializer:
 
     Wire formats
     ------------
-    Legacy single-frame (inbound only, kept for back-compat):
+    Inbound-only single-frame (kept for back-compat with very old senders):
         b"<topic> <pickle_bytes>"
 
-    Legacy multipart (legacy=True or pre-compression senders):
+    Inbound-only pre-protocol-5 multipart (kept for back-compat):
         [topic_bytes, pickle_bytes]
         - main frame begins with 0x80 (pickle proto marker)
 
@@ -62,16 +62,13 @@ class Serializer:
         - tag is a single byte from CODEC_* constants (never 0x80)
     """
 
-    def __init__(self, compression: Optional[str] = None, legacy: bool = False):
-        if compression is not None and legacy:
-            raise ValueError("compression is not supported in legacy mode")
+    def __init__(self, compression: Optional[str] = None):
         if compression not in _NAME_TO_TAG:
             raise ValueError(
                 f"Unknown compression {compression!r}. Supported: None, 'zstd', 'lz4'."
             )
 
         self.compression = compression
-        self.legacy = legacy
 
         # Configure the outbound (serialize) hot path once.
         if compression is None:
@@ -89,9 +86,6 @@ class Serializer:
 
     def serialize(self, topic: str, data: Any) -> List[bytes]:
         topic_bytes = topic.encode("utf-8")
-
-        if self.legacy:
-            return [topic_bytes, pickle.dumps(data)]
 
         buffers: List[Any] = []
         main = pickle.dumps(data, protocol=5, buffer_callback=buffers.append)
@@ -160,7 +154,6 @@ _default_serializer = Serializer()
 def serialize(
     topic: str,
     data: Any,
-    legacy: bool = False,
     compression: Optional[str] = None,
 ) -> List[bytes]:
     """
@@ -169,13 +162,11 @@ def serialize(
     Args:
         topic: The topic string.
         data: The object to serialize.
-        legacy: If True, uses standard pickle.dumps and returns
-                [topic_bytes, pickle_bytes]. Mutually exclusive with compression.
         compression: Optional codec name. One of None, 'zstd', 'lz4'.
     """
-    if not legacy and compression is None:
+    if compression is None:
         return _default_serializer.serialize(topic, data)
-    return Serializer(compression=compression, legacy=legacy).serialize(topic, data)
+    return Serializer(compression=compression).serialize(topic, data)
 
 
 def deserialize(frames: List[bytes]) -> Tuple[str, Any]:

@@ -103,11 +103,6 @@ def test_compressed_payload_smaller_for_compressible_data():
     assert comp_size * 10 < plain_size, (plain_size, comp_size)
 
 
-def test_legacy_and_compression_are_mutually_exclusive():
-    with pytest.raises(ValueError):
-        Serializer(compression="zstd", legacy=True)
-
-
 def test_unknown_codec_rejected():
     with pytest.raises(ValueError):
         Serializer(compression="snappy")
