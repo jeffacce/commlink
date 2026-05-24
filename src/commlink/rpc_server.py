@@ -13,6 +13,7 @@ class RPCServer:
         port: int = 5000,
         threaded: bool = True,
         compression: Optional[str] = None,
+        compression_min_bytes: int = 1024,
     ):
         """
         obj: object with methods to expose
@@ -20,6 +21,8 @@ class RPCServer:
         compression: optional codec for response payloads. One of None, 'zstd', 'lz4'.
             The wire format is self-describing, so the client may use a different setting
             for its outbound requests.
+        compression_min_bytes: per-frame size threshold below which compression is
+            skipped. Has no effect when compression is None. Defaults to 1024.
         """
         self.obj = obj
         self.context = zmq.Context()
@@ -28,7 +31,11 @@ class RPCServer:
         self.threaded = threaded
         self.thread = None
         self.compression = compression
-        self._serializer = Serializer(compression=compression)
+        self.compression_min_bytes = compression_min_bytes
+        self._serializer = Serializer(
+            compression=compression,
+            compression_min_bytes=compression_min_bytes,
+        )
         if threaded:
             self.stop_event = threading.Event()
         else:

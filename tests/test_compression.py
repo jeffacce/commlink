@@ -12,6 +12,7 @@ import zmq
 from commlink import Publisher, RPCClient, RPCServer, Subscriber
 from commlink.serializer import (
     CODEC_LZ4,
+    CODEC_NONE,
     CODEC_ZSTD,
     PICKLE_PROTO_MARKER,
     Serializer,
@@ -52,8 +53,9 @@ def test_serializer_roundtrip_numpy(codec):
 
 @pytest.mark.parametrize("codec", ["zstd", "lz4"])
 def test_compressed_frames_carry_codec_tag(codec):
-    """The first byte of the main and buffer frames must be the codec tag."""
-    ser = Serializer(compression=codec)
+    """The first byte of every frame must be the codec tag when no
+    per-frame threshold filters it out."""
+    ser = Serializer(compression=codec, compression_min_bytes=0)
     img = np.zeros((128, 128, 3), dtype=np.uint8)  # zero-filled => high compression ratio
     frames = ser.serialize("t", {"img": img})
 
@@ -106,6 +108,91 @@ def test_compressed_payload_smaller_for_compressible_data():
 def test_unknown_codec_rejected():
     with pytest.raises(ValueError):
         Serializer(compression="snappy")
+
+
+# -------------------- compression_min_bytes --------------------
+
+
+@pytest.mark.parametrize("codec", ["zstd", "lz4"])
+def test_threshold_skips_compression_for_small_frames(codec):
+    """A small payload below the threshold is emitted with CODEC_NONE, not the
+    configured codec, even when compression is enabled."""
+    ser = Serializer(compression=codec, compression_min_bytes=1024)
+    frames = ser.serialize("joint_state", {"q": np.zeros(7, dtype=np.float32)})
+
+    # Main pickle frame is well under 1 KB → uncompressed tag.
+    assert frames[1][0] == CODEC_NONE
+    # Single 28-byte out-of-band buffer → also uncompressed tag.
+    assert frames[2][0] == CODEC_NONE
+
+    topic, recovered = ser.deserialize(frames)
+    assert topic == "joint_state"
+    assert np.array_equal(recovered["q"], np.zeros(7, dtype=np.float32))
+
+
+@pytest.mark.parametrize("codec", ["zstd", "lz4"])
+def test_threshold_compresses_large_frames(codec):
+    """A payload above the threshold is compressed with the configured codec."""
+    ser = Serializer(compression=codec, compression_min_bytes=1024)
+    img = np.zeros((256, 256, 3), dtype=np.uint8)  # ~196 KB buffer
+    frames = ser.serialize("img", {"img": img})
+
+    expected_tag = {"zstd": CODEC_ZSTD, "lz4": CODEC_LZ4}[codec]
+    # Main pickle frame is tiny → uncompressed; buffer is large → compressed.
+    assert frames[1][0] == CODEC_NONE
+    assert frames[2][0] == expected_tag
+
+    topic, recovered = ser.deserialize(frames)
+    assert topic == "img"
+    assert np.array_equal(recovered["img"], img)
+
+
+def test_threshold_mixed_per_frame_within_one_message():
+    """In one wire message a small main + large buffer should produce mixed tags."""
+    ser = Serializer(compression="zstd", compression_min_bytes=1024)
+    img = np.zeros((720, 1280, 3), dtype=np.uint8)
+    tiny = np.zeros(3, dtype=np.float32)
+    frames = ser.serialize("t", {"img": img, "tiny": tiny})
+
+    assert frames[1][0] == CODEC_NONE       # main pickle ~150 B
+    tags = [f[0] for f in frames[2:]]
+    assert CODEC_NONE in tags                # 12-byte tiny buffer
+    assert CODEC_ZSTD in tags                # 2.7 MB image buffer
+
+    topic, recovered = ser.deserialize(frames)
+    assert topic == "t"
+    assert np.array_equal(recovered["img"], img)
+    assert np.array_equal(recovered["tiny"], tiny)
+
+
+def test_threshold_zero_always_compresses():
+    """compression_min_bytes=0 disables the threshold; every frame uses the codec."""
+    ser = Serializer(compression="zstd", compression_min_bytes=0)
+    frames = ser.serialize("t", {"q": np.zeros(7, dtype=np.float32)})
+    assert frames[1][0] == CODEC_ZSTD
+    assert frames[2][0] == CODEC_ZSTD
+
+
+def test_threshold_huge_never_compresses():
+    """A threshold above any real frame size means nothing ever gets compressed."""
+    ser = Serializer(compression="zstd", compression_min_bytes=10**9)
+    img = np.zeros((256, 256, 3), dtype=np.uint8)
+    frames = ser.serialize("t", {"img": img})
+    for f in frames[1:]:
+        assert f[0] == CODEC_NONE
+
+
+def test_threshold_no_effect_without_compression():
+    """compression_min_bytes is irrelevant when compression is None; the wire
+    format stays the back-compat 0x80 pickle marker, no codec tag."""
+    ser = Serializer(compression=None, compression_min_bytes=0)
+    frames = ser.serialize("t", {"x": 1})
+    assert frames[1][0] == PICKLE_PROTO_MARKER
+
+
+def test_threshold_negative_rejected():
+    with pytest.raises(ValueError):
+        Serializer(compression="zstd", compression_min_bytes=-1)
 
 
 # -------------------- Publisher / Subscriber --------------------

@@ -13,6 +13,8 @@ PICKLE_PROTO_MARKER = 0x80
 _NAME_TO_TAG = {None: None, "none": CODEC_NONE, "zstd": CODEC_ZSTD, "lz4": CODEC_LZ4}
 _TAG_TO_NAME = {CODEC_NONE: "none", CODEC_ZSTD: "zstd", CODEC_LZ4: "lz4"}
 
+_NONE_TAG_BYTE = bytes([CODEC_NONE])
+
 
 def _load_codec(name: str) -> Tuple[Callable[[bytes], bytes], Callable[[bytes], bytes]]:
     """Return (compress, decompress) callables for the named codec."""
@@ -58,17 +60,26 @@ class Serializer:
         - pickle_main begins with 0x80
 
     Compressed multipart (compression in {'zstd','lz4'}):
-        [topic_bytes, tag||compressed_main, *(tag||compressed_buffer)]
+        [topic_bytes, tag||payload_main, *(tag||payload_buffer)]
         - tag is a single byte from CODEC_* constants (never 0x80)
+        - frames below compression_min_bytes carry tag=CODEC_NONE (0x01) and
+          uncompressed payload, so one wire message may mix codecs across frames
     """
 
-    def __init__(self, compression: Optional[str] = None):
+    def __init__(
+        self,
+        compression: Optional[str] = None,
+        compression_min_bytes: int = 1024,
+    ):
         if compression not in _NAME_TO_TAG:
             raise ValueError(
                 f"Unknown compression {compression!r}. Supported: None, 'zstd', 'lz4'."
             )
+        if compression_min_bytes < 0:
+            raise ValueError("compression_min_bytes must be >= 0")
 
         self.compression = compression
+        self.compression_min_bytes = compression_min_bytes
 
         # Configure the outbound (serialize) hot path once.
         if compression is None:
@@ -96,9 +107,18 @@ class Serializer:
 
         tag = self._tag_byte
         compress = self._compress
-        out: List[bytes] = [topic_bytes, tag + compress(main)]
+        threshold = self.compression_min_bytes
+
+        if len(main) < threshold:
+            out: List[bytes] = [topic_bytes, _NONE_TAG_BYTE + main]
+        else:
+            out = [topic_bytes, tag + compress(main)]
         for buf in buffers:
-            out.append(tag + compress(bytes(buf)))
+            b = bytes(buf)
+            if len(b) < threshold:
+                out.append(_NONE_TAG_BYTE + b)
+            else:
+                out.append(tag + compress(b))
         return out
 
     def deserialize(self, frames: List[bytes]) -> Tuple[str, Any]:
@@ -155,6 +175,7 @@ def serialize(
     topic: str,
     data: Any,
     compression: Optional[str] = None,
+    compression_min_bytes: int = 1024,
 ) -> List[bytes]:
     """
     Serialize data for transport.
@@ -163,10 +184,16 @@ def serialize(
         topic: The topic string.
         data: The object to serialize.
         compression: Optional codec name. One of None, 'zstd', 'lz4'.
+        compression_min_bytes: Per-frame size below which compression is skipped
+            (the frame is emitted with the CODEC_NONE tag instead). Has no effect
+            when compression is None. Defaults to 1024.
     """
     if compression is None:
         return _default_serializer.serialize(topic, data)
-    return Serializer(compression=compression).serialize(topic, data)
+    return Serializer(
+        compression=compression,
+        compression_min_bytes=compression_min_bytes,
+    ).serialize(topic, data)
 
 
 def deserialize(frames: List[bytes]) -> Tuple[str, Any]:

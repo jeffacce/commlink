@@ -21,6 +21,7 @@ class Publisher:
         host: str,
         port: int = 5000,
         compression: Optional[str] = None,
+        compression_min_bytes: int = 1024,
         queue_size: Optional[int] = 10,
     ):
         """
@@ -29,6 +30,12 @@ class Publisher:
         compression: optional codec for payload compression. One of None, 'zstd', 'lz4'.
                      The wire format is self-describing, so subscribers do not need a
                      matching setting.
+        compression_min_bytes: per-frame size threshold below which compression is
+                     skipped. Each pickle main frame and out-of-band buffer is
+                     evaluated independently, so a small joint-state message pays
+                     no compression cost while images in the same publisher are
+                     still compressed. Has no effect when compression is None.
+                     Defaults to 1024.
         queue_size: ZMQ_SNDHWM for the ROUTER socket. Bounds how many outbound frames
                     may queue per subscriber identity before sends start dropping.
                     Default 10. None falls through to ZMQ's built-in (1000).
@@ -40,8 +47,12 @@ class Publisher:
         self.socket.bind(f"tcp://{host}:{port}")
 
         self.compression = compression
+        self.compression_min_bytes = compression_min_bytes
         self.queue_size = queue_size
-        self._serializer = Serializer(compression=compression)
+        self._serializer = Serializer(
+            compression=compression,
+            compression_min_bytes=compression_min_bytes,
+        )
 
         # Cache: topic -> (version_ns, [serialized frames]). Both the publish thread
         # (writer) and the service thread (PULL reader) touch this, so all access is

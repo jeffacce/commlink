@@ -15,19 +15,31 @@ class RPCException(Exception):
 
 
 class RPCClient:
-    def __init__(self, host: str, port: int = 5000, compression: Optional[str] = None):
+    def __init__(
+        self,
+        host: str,
+        port: int = 5000,
+        compression: Optional[str] = None,
+        compression_min_bytes: int = 1024,
+    ):
         """
         host: host to connect to
         port: port to connect to
         compression: optional codec for outbound request payloads. One of None, 'zstd', 'lz4'.
             The wire format is self-describing, so the server may use a different setting.
+        compression_min_bytes: per-frame size threshold below which compression is
+            skipped. Has no effect when compression is None. Defaults to 1024.
         """
         self.__dict__["context"] = zmq.Context()
         self.__dict__["socket"] = self.context.socket(zmq.REQ)
         self.socket.connect(f"tcp://{host}:{port}")
         self.__dict__["_is_callable_cache"] = {}
         self.__dict__["compression"] = compression
-        self.__dict__["_serializer"] = Serializer(compression=compression)
+        self.__dict__["compression_min_bytes"] = compression_min_bytes
+        self.__dict__["_serializer"] = Serializer(
+            compression=compression,
+            compression_min_bytes=compression_min_bytes,
+        )
         # zmq.REQ enforces strict send->recv alternation and zmq sockets are not
         # thread-safe; serialize each request/response pair so concurrent callers
         # don't trip the REQ state machine (EFSM).
