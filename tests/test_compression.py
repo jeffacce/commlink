@@ -27,12 +27,6 @@ def get_free_port() -> int:
         return sock.getsockname()[1]
 
 
-def set_receive_timeouts(sub: Subscriber, timeout_ms: int = 1500) -> None:
-    sub._global_socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
-    for s in sub._topic_sockets.values():
-        s.setsockopt(zmq.RCVTIMEO, timeout_ms)
-
-
 # -------------------- Serializer-level --------------------
 
 @pytest.mark.parametrize("codec", CODECS)
@@ -123,81 +117,57 @@ def test_unknown_codec_rejected():
 
 @pytest.mark.parametrize("codec", CODECS)
 def test_pubsub_roundtrip(codec):
+    """End-to-end with a publisher-side codec. The subscriber decodes
+    automatically from the wire format's self-describing tag."""
     port = get_free_port()
     pub = Publisher("*", port=port, compression=codec)
-    sub = Subscriber("127.0.0.1", port=port, topics=["frame"], buffer=False, compression=codec)
-    set_receive_timeouts(sub)
+    sub = Subscriber("127.0.0.1", port=port)
+    try:
+        time.sleep(0.05)
+        img = np.random.randint(0, 255, (180, 320, 3), dtype=np.uint8)
+        pub["frame"] = {"img": img, "ts": 1.0}
+        time.sleep(0.05)
 
-    time.sleep(0.05)
-    img = np.random.randint(0, 255, (180, 320, 3), dtype=np.uint8)
-    pub["frame"] = {"img": img, "ts": 1.0}
-    time.sleep(0.05)
-
-    out = sub["frame"]
-    assert np.array_equal(out["img"], img)
-    assert out["ts"] == 1.0
-    sub.stop()
+        out = sub["frame"]
+        assert np.array_equal(out["img"], img)
+        assert out["ts"] == 1.0
+    finally:
+        sub.stop()
+        pub.stop()
 
 
 def test_queue_size_options_applied():
-    """Verify queue_size translates to the underlying ZMQ_SNDHWM / ZMQ_RCVHWM."""
+    """queue_size sets ZMQ_SNDHWM on the publisher ROUTER and ZMQ_RCVHWM on the
+    push-mode subscriber DEALER."""
     port = get_free_port()
     pub = Publisher("*", port=port, queue_size=2)
-    sub = Subscriber("127.0.0.1", port=port, topics=["x"], buffer=True, queue_size=4)
+    sub = Subscriber("127.0.0.1", port=port, buffer=True, queue_size=4)
     try:
         assert pub.socket.getsockopt(zmq.SNDHWM) == 2
-        assert sub._global_socket.getsockopt(zmq.RCVHWM) == 4
-        assert sub._topic_sockets["x"].getsockopt(zmq.RCVHWM) == 4
+        assert sub._dealer.getsockopt(zmq.RCVHWM) == 4
     finally:
         sub.stop()
-
-
-def test_queue_size_drops_stale_frames():
-    """With queue_size=1 + buffer=False, a burst of 50 should drop most frames."""
-    port = get_free_port()
-    pub = Publisher("*", port=port, queue_size=1)
-    sub = Subscriber("127.0.0.1", port=port, topics=["x"], buffer=False, queue_size=1)
-    set_receive_timeouts(sub)
-    time.sleep(0.05)
-
-    # Publish a burst; with HWM=1 most are dropped on the wire.
-    for i in range(50):
-        pub.publish("x", i)
-    time.sleep(0.1)
-
-    # buffer=False conflates by draining; we expect to see *some* value <= 49,
-    # but typically the latest few only -- never all 50.
-    received = []
-    while True:
-        try:
-            received.append(sub._topic_sockets["x"].recv_multipart(flags=zmq.NOBLOCK))
-        except zmq.Again:
-            break
-    sub.stop()
-
-    assert len(received) < 50, f"queue_size=1 should drop frames; got all {len(received)}"
+        pub.stop()
 
 
 @pytest.mark.parametrize("send_codec", CODECS)
-@pytest.mark.parametrize("recv_codec", CODECS)
-def test_pubsub_cross_codec(send_codec, recv_codec):
-    """Subscribers should auto-decode regardless of their compression setting."""
+def test_pubsub_decodes_any_publisher_codec(send_codec):
+    """Subscribers should auto-decode regardless of the publisher's codec."""
     port = get_free_port()
     pub = Publisher("*", port=port, compression=send_codec)
-    sub = Subscriber(
-        "127.0.0.1", port=port, topics=["frame"], buffer=False, compression=recv_codec
-    )
-    set_receive_timeouts(sub)
+    sub = Subscriber("127.0.0.1", port=port)
+    try:
+        time.sleep(0.05)
+        payload = {"arr": np.arange(1000, dtype=np.int32), "label": "ok"}
+        pub["frame"] = payload
+        time.sleep(0.05)
 
-    time.sleep(0.05)
-    payload = {"arr": np.arange(1000, dtype=np.int32), "label": "ok"}
-    pub["frame"] = payload
-    time.sleep(0.05)
-
-    out = sub["frame"]
-    assert np.array_equal(out["arr"], payload["arr"])
-    assert out["label"] == "ok"
-    sub.stop()
+        out = sub["frame"]
+        assert np.array_equal(out["arr"], payload["arr"])
+        assert out["label"] == "ok"
+    finally:
+        sub.stop()
+        pub.stop()
 
 
 # -------------------- RPC --------------------

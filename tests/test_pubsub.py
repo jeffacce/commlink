@@ -1,8 +1,8 @@
 import socket
+import threading
 import time
 
 import pytest
-import zmq
 
 from commlink.publisher import Publisher
 from commlink.subscriber import Subscriber
@@ -14,174 +14,272 @@ def get_free_port() -> int:
         return sock.getsockname()[1]
 
 
-def set_receive_timeouts(subscriber: Subscriber, timeout_ms: int = 1000) -> None:
-    subscriber._global_socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
-    for socket in subscriber._topic_sockets.values():
-        socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+# ---------------------------------------------------------------- pull mode (buffer=False)
 
 
-def test_multi_topic_specific_sockets_keep_latest_message():
+def test_pull_returns_latest_value():
     port = get_free_port()
-    publisher = Publisher("*", port=port)
-    subscriber = Subscriber("127.0.0.1", port=port, topics=["alpha", "beta"], buffer=False)
-    set_receive_timeouts(subscriber)
-
-    time.sleep(0.05)
-    publisher.publish("alpha", "first-alpha")
-    publisher.publish("beta", "first-beta")
-    publisher.publish("alpha", "second-alpha")
-    publisher.publish("beta", "second-beta")
-    time.sleep(0.05)
-
-    data_a = subscriber.get("alpha")
-    assert data_a == "second-alpha"
-
-    data_b = subscriber.get("beta")
-    assert data_b == "second-beta"
-
-    subscriber.stop()
+    pub = Publisher("*", port=port)
+    sub = Subscriber("127.0.0.1", port=port)
+    try:
+        time.sleep(0.05)
+        pub.publish("alpha", "first")
+        pub.publish("alpha", "second")
+        time.sleep(0.05)
+        assert sub["alpha"] == "second"
+        assert sub.get("alpha") == "second"
+    finally:
+        sub.stop()
+        pub.stop()
 
 
-def test_global_get_receives_messages_from_all_topics():
+def test_pull_independent_per_topic():
     port = get_free_port()
-    publisher = Publisher("*", port=port)
-    subscriber = Subscriber("127.0.0.1", port=port, topics=["one", "two"], buffer=True)
-    set_receive_timeouts(subscriber)
-
-    time.sleep(0.05)
-    publisher.publish("one", 1)
-    publisher.publish("two", 2)
-
-    received_topics = []
-    for _ in range(2):
-        topic, data = subscriber.get()
-        received_topics.append(topic)
-        assert data in (1, 2)
-
-    assert set(received_topics) == {"one", "two"}
-
-    subscriber.stop()
+    pub = Publisher("*", port=port)
+    sub = Subscriber("127.0.0.1", port=port)
+    try:
+        time.sleep(0.05)
+        pub.publish("red", "R")
+        pub.publish("blue", "B")
+        time.sleep(0.05)
+        assert sub["red"] == "R"
+        assert sub["blue"] == "B"
+    finally:
+        sub.stop()
+        pub.stop()
 
 
-def test_getitem_reads_specific_topic_socket():
+def test_pull_first_call_blocks_until_publish():
     port = get_free_port()
-    publisher = Publisher("*", port=port)
-    subscriber = Subscriber("127.0.0.1", port=port, topics=["red", "blue"], buffer=False)
-    set_receive_timeouts(subscriber)
+    pub = Publisher("*", port=port)
+    sub = Subscriber("127.0.0.1", port=port)
+    try:
+        result = {}
 
-    time.sleep(0.05)
-    publisher.publish("blue", "other")
-    publisher.publish("red", "stale")
-    publisher.publish("red", "fresh")
-    time.sleep(0.05)
+        def reader():
+            result["v"] = sub["late"]
 
-    data = subscriber["red"]
-    assert data == "fresh"
+        t = threading.Thread(target=reader)
+        t.start()
+        # Reader should be blocked since no one has published "late" yet.
+        t.join(timeout=0.2)
+        assert t.is_alive(), "expected reader to block on unknown topic"
+        pub.publish("late", "arrived")
+        t.join(timeout=2.0)
+        assert not t.is_alive()
+        assert result["v"] == "arrived"
+    finally:
+        sub.stop()
+        pub.stop()
 
-    subscriber.stop()
 
-
-def test_setitem_publishes():
+def test_pull_returns_cache_when_no_new_publish():
     port = get_free_port()
-    publisher = Publisher("*", port=port)
-    subscriber = Subscriber("127.0.0.1", port=port, topics=["alpha"], buffer=False)
-    set_receive_timeouts(subscriber)
+    pub = Publisher("*", port=port)
+    sub = Subscriber("127.0.0.1", port=port)
+    try:
+        time.sleep(0.05)
+        pub.publish("k", "v1")
+        time.sleep(0.05)
+        assert sub["k"] == "v1"
+        # No new publish: still returns cached, doesn't block.
+        assert sub["k"] == "v1"
+        assert sub["k"] == "v1"
+    finally:
+        sub.stop()
+        pub.stop()
 
-    time.sleep(0.05)
-    publisher["alpha"] = "published via setitem"
-    time.sleep(0.05)
 
-    assert subscriber["alpha"] == "published via setitem"
-
-    subscriber.stop()
-
-
-def test_get_raises_for_unsubscribed_topic():
+def test_pull_get_without_topic_raises():
     port = get_free_port()
-    publisher = Publisher("*", port=port)
-    subscriber = Subscriber("127.0.0.1", port=port, topics=["alpha"], buffer=False)
-    set_receive_timeouts(subscriber)
-    time.sleep(0.05)
-
-    with pytest.raises(KeyError):
-        subscriber.get("beta")
-
-    publisher.publish("alpha", "value")
-    time.sleep(0.05)
-    assert subscriber.get("alpha") == "value"
-
-    subscriber.stop()
+    pub = Publisher("*", port=port)
+    sub = Subscriber("127.0.0.1", port=port)
+    try:
+        with pytest.raises(TypeError):
+            sub.get()
+    finally:
+        sub.stop()
+        pub.stop()
 
 
-def test_global_subscription_with_empty_topics_list():
+def test_pull_setitem_publishes():
     port = get_free_port()
-    publisher = Publisher("*", port=port)
-    subscriber = Subscriber("127.0.0.1", port=port, topics=[], buffer=True)
-    set_receive_timeouts(subscriber)
-
-    time.sleep(0.05)
-    publisher.publish("x", "first")
-    publisher.publish("y", "second")
-
-    received = {subscriber.get()[0], subscriber.get()[0]}
-    assert received == {"x", "y"}
-
-    subscriber.stop()
+    pub = Publisher("*", port=port)
+    sub = Subscriber("127.0.0.1", port=port)
+    try:
+        time.sleep(0.05)
+        pub["greet"] = "hello"
+        time.sleep(0.05)
+        assert sub["greet"] == "hello"
+    finally:
+        sub.stop()
+        pub.stop()
 
 
-def test_topic_validation_rejects_spaces():
+def test_pull_survives_publisher_restart():
+    port = get_free_port()
+    pub = Publisher("*", port=port)
+    sub = Subscriber("127.0.0.1", port=port)
+    try:
+        time.sleep(0.05)
+        pub.publish("x", "before")
+        time.sleep(0.05)
+        assert sub["x"] == "before"
+
+        pub.stop()
+        time.sleep(0.05)
+        pub = Publisher("*", port=port)
+        time.sleep(0.05)
+        pub.publish("x", "after")
+        time.sleep(0.05)
+        assert sub["x"] == "after"
+    finally:
+        sub.stop()
+        pub.stop()
+
+
+# ---------------------------------------------------------------- push mode (buffer=True)
+
+
+def test_push_global_get_arrival_order():
+    port = get_free_port()
+    pub = Publisher("*", port=port)
+    sub = Subscriber("127.0.0.1", port=port, buffer=True)
+    try:
+        time.sleep(0.05)
+        pub.publish("one", 1)
+        pub.publish("two", 2)
+        topics = sorted([sub.get()[0], sub.get()[0]])
+        assert topics == ["one", "two"]
+    finally:
+        sub.stop()
+        pub.stop()
+
+
+def test_push_per_topic_order():
+    port = get_free_port()
+    pub = Publisher("*", port=port)
+    sub = Subscriber("127.0.0.1", port=port, buffer=True)
+    try:
+        time.sleep(0.05)
+        pub.publish("seq", 1)
+        pub.publish("seq", 2)
+        pub.publish("seq", 3)
+        assert sub["seq"] == 1
+        assert sub["seq"] == 2
+        assert sub["seq"] == 3
+    finally:
+        sub.stop()
+        pub.stop()
+
+
+def test_push_filter_skips_other_topics():
+    port = get_free_port()
+    pub = Publisher("*", port=port)
+    sub = Subscriber("127.0.0.1", port=port, topics=["wanted"], buffer=True)
+    try:
+        time.sleep(0.05)
+        pub.publish("ignored", "x")
+        pub.publish("wanted", "y")
+        pub.publish("ignored", "z")
+        topic, data = sub.get()
+        assert topic == "wanted"
+        assert data == "y"
+    finally:
+        sub.stop()
+        pub.stop()
+
+
+def test_push_drops_when_queue_full():
+    port = get_free_port()
+    pub = Publisher("*", port=port)
+    sub = Subscriber("127.0.0.1", port=port, buffer=True, queue_size=3)
+    try:
+        time.sleep(0.05)
+        for i in range(20):
+            pub.publish("flood", i)
+        time.sleep(0.1)
+        # Per-topic deque is bounded; collected items can't exceed queue_size.
+        collected = [sub["flood"] for _ in range(3)]
+        assert all(isinstance(v, int) for v in collected)
+        assert len(collected) == 3
+
+        # A 4th get should block since the deque only holds 3 and nothing new
+        # has been published. Verify by polling in a thread with a deadline.
+        done = threading.Event()
+
+        def reader():
+            try:
+                sub["flood"]
+            except Exception:
+                pass
+            done.set()
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        # Expect it to still be blocked after a short wait.
+        assert not done.wait(timeout=0.2), "expected get() to block on empty deque"
+    finally:
+        sub.stop()
+        pub.stop()
+
+
+# ---------------------------------------------------------------- validation
+
+
+def test_topic_with_space_rejected_publisher():
+    port = get_free_port()
+    pub = Publisher("*", port=port)
+    try:
+        with pytest.raises(ValueError):
+            pub.publish("bad topic", "x")
+    finally:
+        pub.stop()
+
+
+def test_topic_with_space_rejected_subscriber_filter():
     port = get_free_port()
     with pytest.raises(ValueError):
         Subscriber("127.0.0.1", port=port, topics=["bad topic"], buffer=True)
 
 
-def test_buffer_true_preserves_order_on_topic_socket():
-    port = get_free_port()
-    publisher = Publisher("*", port=port)
-    subscriber = Subscriber("127.0.0.1", port=port, topics=["seq"], buffer=True)
-    set_receive_timeouts(subscriber)
-
-    time.sleep(0.05)
-    publisher.publish("seq", 1)
-    publisher.publish("seq", 2)
-    time.sleep(0.05)
-
-    first = subscriber.get("seq")
-    second = subscriber.get("seq")
-    assert first == 1
-    assert second == 2
-
-    subscriber.stop()
-
-
-def test_conflate_global_subscription_rejected():
-    port = get_free_port()
-    with pytest.warns(RuntimeWarning):
-        sub_empty = Subscriber("127.0.0.1", port=port, topics=[], buffer=False)
-        sub_empty.stop()
-
-
-def test_topics_str_is_normalized_to_list():
+def test_topics_str_rejected():
     port = get_free_port()
     with pytest.raises(TypeError):
-        Subscriber("127.0.0.1", port=port, topics="solo", buffer=False)
+        Subscriber("127.0.0.1", port=port, topics="solo")
 
 
-def test_buffer_false_implies_persistence():
+def test_compression_kwarg_deprecated():
     port = get_free_port()
-    publisher = Publisher("*", port=port)
-    # Persistence is now automatic when buffer=False
-    subscriber = Subscriber("127.0.0.1", port=port, topics=["p1"], buffer=False)
-    set_receive_timeouts(subscriber)
+    pub = Publisher("*", port=port)
+    try:
+        with pytest.warns(DeprecationWarning):
+            sub = Subscriber("127.0.0.1", port=port, compression="zstd")
+        sub.stop()
+    finally:
+        pub.stop()
 
-    time.sleep(0.05)
-    publisher["p1"] = "persisted"
-    time.sleep(0.05)
 
-    # First read
-    assert subscriber["p1"] == "persisted"
+# ---------------------------------------------------------------- pull cost / freshness
 
-    # Second read - should be cached
-    assert subscriber["p1"] == "persisted"
 
-    subscriber.stop()
+def test_pull_no_change_reply_is_cheap():
+    """Hammering sub['k'] when nothing new is published should keep returning the cached
+    value without ever appearing to stall, even at high call rate."""
+    port = get_free_port()
+    pub = Publisher("*", port=port)
+    sub = Subscriber("127.0.0.1", port=port)
+    try:
+        time.sleep(0.05)
+        pub.publish("k", "value")
+        time.sleep(0.05)
+        assert sub["k"] == "value"
+        t0 = time.monotonic()
+        for _ in range(200):
+            assert sub["k"] == "value"
+        elapsed = time.monotonic() - t0
+        # 200 round-trip PULLs on loopback should comfortably finish under a second.
+        assert elapsed < 2.0, f"200 no-change pulls took {elapsed:.2f}s"
+    finally:
+        sub.stop()
+        pub.stop()
